@@ -135,80 +135,112 @@ export class BrowserIndexedDB implements IOHandler {
         const db = openRequest.result;
 
         if (modelArtifacts == null) {
-          // Read model out from object store.
-          const modelTx = db.transaction(MODEL_STORE_NAME, 'readonly');
-          const modelStore = modelTx.objectStore(MODEL_STORE_NAME);
-          const getRequest = modelStore.get(this.modelPath);
-          getRequest.onsuccess = () => {
-            if (getRequest.result == null) {
-              db.close();
-              return reject(new Error(
-                  `Cannot find model with path '${this.modelPath}' ` +
-                  `in IndexedDB.`));
-            } else {
-              resolve(getRequest.result.modelArtifacts);
-            }
-          };
-          getRequest.onerror = error => {
-            db.close();
-            return reject(getRequest.error);
-          };
-          modelTx.oncomplete = () => db.close();
+          this.loadModel(db)
+            .then((modelArtifacts: ModelArtifacts) => resolve(modelArtifacts))
+            .catch((err) => reject(err));
         } else {
-          // Put model into object store.
-          const modelArtifactsInfo: ModelArtifactsInfo =
-              getModelArtifactsInfoForJSON(modelArtifacts);
-          // First, put ModelArtifactsInfo into info store.
-          const infoTx = db.transaction(INFO_STORE_NAME, 'readwrite');
-          let infoStore = infoTx.objectStore(INFO_STORE_NAME);
-          const putInfoRequest =
-              infoStore.put({modelPath: this.modelPath, modelArtifactsInfo});
-          let modelTx: IDBTransaction;
-          putInfoRequest.onsuccess = () => {
-            // Second, put model data into model store.
-            modelTx = db.transaction(MODEL_STORE_NAME, 'readwrite');
-            const modelStore = modelTx.objectStore(MODEL_STORE_NAME);
-            const putModelRequest = modelStore.put({
-              modelPath: this.modelPath,
-              modelArtifacts,
-              modelArtifactsInfo
-            });
-            putModelRequest.onsuccess = () => resolve({modelArtifactsInfo});
-            putModelRequest.onerror = error => {
-              // If the put-model request fails, roll back the info entry as
-              // well.
-              infoStore = infoTx.objectStore(INFO_STORE_NAME);
-              let deleteInfoRequest: IDBRequest;
-              try {
-                deleteInfoRequest = infoStore.delete(this.modelPath);
-              } catch (err) {
-                return reject(putModelRequest.error);
-              }
-              deleteInfoRequest.onsuccess = () => {
-                db.close();
-                return reject(putModelRequest.error);
-              };
-              deleteInfoRequest.onerror = error => {
-                db.close();
-                return reject(putModelRequest.error);
-              };
-            };
-          };
-          putInfoRequest.onerror = error => {
-            db.close();
-            return reject(putInfoRequest.error);
-          };
-          infoTx.oncomplete = () => {
-            if (modelTx == null) {
-              db.close();
-            } else {
-              modelTx.oncomplete = () => db.close();
-            }
-          };
+          this.saveModel(db, modelArtifacts)
+            .then((result: SaveResult) => resolve(result))
+            .catch((err) => reject(err));
         }
       };
       openRequest.onerror = error => reject(openRequest.error);
     });
+  }
+
+  private loadModel(db: IDBDatabase): Promise<ModelArtifacts> {
+    return new Promise ((resolve, reject) => {
+      const modelTx = db.transaction(MODEL_STORE_NAME, 'readonly');
+      const modelStore = modelTx.objectStore(MODEL_STORE_NAME);
+      const getRequest = modelStore.get(this.modelPath);
+
+      getRequest.onsuccess = () => {
+        if (getRequest.result == null) {
+          db.close();
+          return reject(new Error(
+              `Cannot find model with path '${this.modelPath}' ` +
+              `in IndexedDB.`));
+        } else {
+          resolve(getRequest.result.modelArtifacts);
+        }
+      };
+      getRequest.onerror = error => {
+        db.close();
+        return reject(getRequest.error);
+      };
+      modelTx.oncomplete = () => db.close();
+    });
+  }
+
+  private saveModel(db: IDBDatabase, modelArtifacts: ModelArtifacts):
+      Promise<SaveResult> {
+    return new Promise ((resolve, reject) => {
+      const modelArtifactsInfo: ModelArtifactsInfo =
+      getModelArtifactsInfoForJSON(modelArtifacts);
+
+      // First, put ModelArtifactsInfo into info store.
+      const infoTx = db.transaction(INFO_STORE_NAME, 'readwrite');
+      let infoStore = infoTx.objectStore(INFO_STORE_NAME);
+      const putInfoRequest =
+          infoStore.put({modelPath: this.modelPath, modelArtifactsInfo});
+      let modelTx: IDBTransaction;
+      putInfoRequest.onsuccess = () => {
+
+        // Second, put model data into model store.
+        modelTx = db.transaction(MODEL_STORE_NAME, 'readwrite');
+        const modelStore = modelTx.objectStore(MODEL_STORE_NAME);
+        const putModelRequest = modelStore.put({
+          modelPath: this.modelPath,
+          modelArtifacts,
+          modelArtifactsInfo
+        });
+
+        putModelRequest.onsuccess = () => resolve({modelArtifactsInfo});
+        putModelRequest.onerror = error => {
+          // If the put-model request fails, roll back the info entry as
+          // well. If rollback fails, reject with error that triggered the
+          // rollback initially.
+          this.rollback(db, INFO_STORE_NAME, this.modelPath)
+            .then(() => reject(putModelRequest.error))
+            .catch((err) => reject(putModelRequest.error));
+        };
+      };
+      putInfoRequest.onerror = error => {
+        db.close();
+        return reject(putInfoRequest.error);
+      };
+      infoTx.oncomplete = () => {
+        if (modelTx == null) {
+          db.close();
+        } else {
+          modelTx.oncomplete = () => db.close();
+        }
+      };
+    });
+  }
+
+  private rollback(db: IDBDatabase, storeName: string, keyPath: string):
+      Promise<void> {
+    return new Promise((resolve, reject) => {
+      const storeTx = db.transaction(storeName, 'readwrite');
+      const store = storeTx.objectStore(storeName);
+
+      let deleteInfoRequest: IDBRequest;
+      try {
+        deleteInfoRequest = store.delete(keyPath);
+      } catch (err) {
+        return reject(err)
+      }
+
+      deleteInfoRequest.onsuccess = () => {
+        db.close();
+        return resolve();
+      };
+      deleteInfoRequest.onerror = error => {
+        db.close();
+        return reject(error);
+      };
+    })
   }
 }
 
