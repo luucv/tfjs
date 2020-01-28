@@ -283,6 +283,16 @@ export declare interface ModelArtifacts {
 }
 
 /**
+ * IndexedDB format for the ModelArtifacts
+ */
+export declare interface IDBModelArtifacts extends ModelArtifacts {
+  /**
+   * Contains the keys to the weight chuncks.
+   */
+  weightChunckKeys?: string[];
+}
+
+/**
  * The on-disk format of the `model.json` file.
  *
  * TF.js 1.0 always populates the optional fields when writing model.json.

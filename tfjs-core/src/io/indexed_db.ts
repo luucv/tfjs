@@ -17,13 +17,16 @@
 
 import {env} from '../environment';
 
-import {getModelArtifactsInfoForJSON} from './io_utils';
+import {getModelArtifactsInfoForJSON, concatenateArrayBuffers} from './io_utils';
 import {ModelStoreManagerRegistry} from './model_management';
 import {IORouter, IORouterRegistry} from './router_registry';
-import {IOHandler, ModelArtifacts, ModelArtifactsInfo, ModelStoreManager, SaveResult} from './types';
+import {IOHandler, ModelArtifacts, IDBModelArtifacts, ModelArtifactsInfo, ModelStoreManager, SaveResult} from './types';
 
 const DATABASE_NAME = 'tensorflowjs';
 const DATABASE_VERSION = 1;
+
+// Saving in chuncks allows to store bigger models.
+const MAX_CHUNCK_SIZE = 15000000 // 15mb
 
 // Model data and ModelArtifactsInfo (metadata) are stored in two separate
 // stores for efficient access of the list of stored models and their metadata.
@@ -33,6 +36,8 @@ const MODEL_STORE_NAME = 'models_store';
 //    as the type of topology (JSON vs binary), byte size of the topology, byte
 //    size of the weights, etc.
 const INFO_STORE_NAME = 'model_info_store';
+// 3. The object store for WeightData
+const WEIGHTS_STORE_NAME = 'model_weights';
 
 /**
  * Delete the entire database for tensorflow.js, including the models store.
@@ -72,6 +77,7 @@ function setUpDatabase(openRequest: IDBRequest) {
   const db = openRequest.result as IDBDatabase;
   db.createObjectStore(MODEL_STORE_NAME, {keyPath: 'modelPath'});
   db.createObjectStore(INFO_STORE_NAME, {keyPath: 'modelPath'});
+  db.createObjectStore(WEIGHTS_STORE_NAME, {keyPath: 'chunckId'});
 }
 
 /**
@@ -136,7 +142,7 @@ export class BrowserIndexedDB implements IOHandler {
 
         if (modelArtifacts == null) {
           this.loadModel(db)
-            .then((modelArtifacts: ModelArtifacts) => resolve(modelArtifacts))
+            .then((modelArtifacts: ModelArtifacts) => {resolve(modelArtifacts)})
             .catch((err) => reject(err));
         } else {
           this.saveModel(db, modelArtifacts)
@@ -149,26 +155,40 @@ export class BrowserIndexedDB implements IOHandler {
   }
 
   private loadModel(db: IDBDatabase): Promise<ModelArtifacts> {
-    return new Promise ((resolve, reject) => {
+    return new Promise (async (resolve, reject) => {
       const modelTx = db.transaction(MODEL_STORE_NAME, 'readonly');
       const modelStore = modelTx.objectStore(MODEL_STORE_NAME);
-      const getRequest = modelStore.get(this.modelPath);
+      let model;
 
-      getRequest.onsuccess = () => {
-        if (getRequest.result == null) {
-          db.close();
-          return reject(new Error(
-              `Cannot find model with path '${this.modelPath}' ` +
-              `in IndexedDB.`));
-        } else {
-          resolve(getRequest.result.modelArtifacts);
-        }
-      };
-      getRequest.onerror = error => {
+      try {
+        model = await this.promisifyRequest(modelStore.get(this.modelPath));
+      } catch (error) {
+        return reject(error);
+      }
+
+      if (model == null) {
         db.close();
-        return reject(getRequest.error);
-      };
-      modelTx.oncomplete = () => db.close();
+        return reject(new Error(
+            `Cannot find model with path '${this.modelPath}' ` +
+            `in IndexedDB.`));
+      }
+
+      const idbModelArtifacts: IDBModelArtifacts = model.modelArtifacts;
+      const weightDataChuncked: ArrayBuffer[] = await Promise.all(idbModelArtifacts.weightChunckKeys.map(async (chunckKey: string) => {
+        const weightTx = db.transaction(WEIGHTS_STORE_NAME, 'readwrite');
+        const weightsStore = weightTx.objectStore(WEIGHTS_STORE_NAME);
+        const weightDataChunck = await this.promisifyRequest(weightsStore.get(chunckKey));
+        return weightDataChunck.weightData
+      }));
+
+      const weightData = concatenateArrayBuffers(weightDataChuncked)
+      const modelArtifacts = model.modelArtifacts
+
+      modelArtifacts.weightData = weightData
+      resolve(modelArtifacts);
+
+      // ??
+      // modelTx.oncomplete = () => db.close();
     });
   }
 
@@ -195,16 +215,58 @@ export class BrowserIndexedDB implements IOHandler {
         return reject(putInfoRequest.error);
       }
 
-      // Second, put model data into model store.
+      // Second, store the model weights in chuncks.
+      const amountOfChuncks = Math.ceil(modelArtifacts.weightData.byteLength / MAX_CHUNCK_SIZE)
+      const chunckIds = Array.from(Array(amountOfChuncks).keys()).map((item, i) => {
+        return `dextr_${i}`
+      });
+
+      try {
+        await Promise.all(chunckIds.map(async (chunckId, i) => {
+          const weightTx = db.transaction(WEIGHTS_STORE_NAME, 'readwrite');
+          const weightsStore = weightTx.objectStore(WEIGHTS_STORE_NAME);
+
+          const start = i * MAX_CHUNCK_SIZE
+          const end = start + MAX_CHUNCK_SIZE <
+            modelArtifacts.weightData.byteLength ? start + MAX_CHUNCK_SIZE :
+            modelArtifacts.weightData.byteLength;
+
+          const weightData = modelArtifacts.weightData.slice(start, end)
+
+          try {
+            await this.promisifyRequest(
+              weightsStore.put({
+                chunckId,
+                weightData,
+              })
+            );
+          } catch (err) {
+            throw new Error(err)
+          }
+        }));
+      } catch (error) {
+        // If the put-model request fails, roll back the info entry as
+        // well. If rollback fails, reject with error that triggered the
+        // rollback initially.
+        this.rollbackArray(db, WEIGHTS_STORE_NAME, chunckIds).catch();
+        this.rollback(db, INFO_STORE_NAME, this.modelPath).catch();
+        reject(error)
+      }
+
+      // Third, put model data into model store.
       const modelTx = db.transaction(MODEL_STORE_NAME, 'readwrite');
       const modelStore = modelTx.objectStore(MODEL_STORE_NAME);
       let putModelRequest: IDBTransaction;
+
+      const idbModelArtifacts: IDBModelArtifacts = modelArtifacts;
+      idbModelArtifacts.weightData = null;
+      idbModelArtifacts.weightChunckKeys = chunckIds
 
       try {
         putModelRequest = await this.promisifyRequest(
           modelStore.put({
             modelPath: this.modelPath,
-            modelArtifacts,
+            modelArtifacts: idbModelArtifacts,
             modelArtifactsInfo
           })
         );
@@ -225,10 +287,20 @@ export class BrowserIndexedDB implements IOHandler {
           modelTx.oncomplete = () => db.close();
         }
       };
-
       resolve({ modelArtifactsInfo });
     });
-    }
+  }
+
+  private rollbackArray(db: IDBDatabase, storeName: string, keyPaths: string[]):
+      Promise<void> {
+    return new Promise(async (resolve, reject) => {
+      await Promise.all(keyPaths.map(keyPath => {
+        this.rollback(db, storeName, keyPath)
+          .then(() => resolve())
+          .catch(() => reject())
+      }));
+    });
+  }
 
   private rollback(db: IDBDatabase, storeName: string, keyPath: string):
       Promise<void> {
@@ -244,11 +316,9 @@ export class BrowserIndexedDB implements IOHandler {
       }
 
       deleteInfoRequest.onsuccess = () => {
-        db.close();
         return resolve();
       };
       deleteInfoRequest.onerror = error => {
-        db.close();
         return reject(error);
       };
     })
