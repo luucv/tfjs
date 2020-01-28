@@ -174,41 +174,50 @@ export class BrowserIndexedDB implements IOHandler {
 
   private saveModel(db: IDBDatabase, modelArtifacts: ModelArtifacts):
       Promise<SaveResult> {
-    return new Promise ((resolve, reject) => {
+    return new Promise (async (resolve, reject) => {
       const modelArtifactsInfo: ModelArtifactsInfo =
       getModelArtifactsInfoForJSON(modelArtifacts);
 
       // First, put ModelArtifactsInfo into info store.
       const infoTx = db.transaction(INFO_STORE_NAME, 'readwrite');
-      let infoStore = infoTx.objectStore(INFO_STORE_NAME);
-      const putInfoRequest =
-          infoStore.put({modelPath: this.modelPath, modelArtifactsInfo});
-      let modelTx: IDBTransaction;
-      putInfoRequest.onsuccess = () => {
+      const infoStore = infoTx.objectStore(INFO_STORE_NAME);
+      let putInfoRequest: IDBRequest;
 
-        // Second, put model data into model store.
-        modelTx = db.transaction(MODEL_STORE_NAME, 'readwrite');
-        const modelStore = modelTx.objectStore(MODEL_STORE_NAME);
-        const putModelRequest = modelStore.put({
-          modelPath: this.modelPath,
-          modelArtifacts,
-          modelArtifactsInfo
-        });
-
-        putModelRequest.onsuccess = () => resolve({modelArtifactsInfo});
-        putModelRequest.onerror = error => {
-          // If the put-model request fails, roll back the info entry as
-          // well. If rollback fails, reject with error that triggered the
-          // rollback initially.
-          this.rollback(db, INFO_STORE_NAME, this.modelPath)
-            .then(() => reject(putModelRequest.error))
-            .catch((err) => reject(putModelRequest.error));
-        };
-      };
-      putInfoRequest.onerror = error => {
+      try {
+        putInfoRequest = await this.promisifyRequest(
+          infoStore.put({
+            modelPath: this.modelPath,
+            modelArtifactsInfo}
+          )
+        );
+      } catch (error) {
         db.close();
         return reject(putInfoRequest.error);
-      };
+      }
+
+      // Second, put model data into model store.
+      const modelTx = db.transaction(MODEL_STORE_NAME, 'readwrite');
+      const modelStore = modelTx.objectStore(MODEL_STORE_NAME);
+      let putModelRequest: IDBTransaction;
+
+      try {
+        putModelRequest = await this.promisifyRequest(
+          modelStore.put({
+            modelPath: this.modelPath,
+            modelArtifacts,
+            modelArtifactsInfo
+          })
+        );
+      } catch (error) {
+        // If the put-model request fails, roll back the info entry as
+        // well. If rollback fails, reject with error that triggered the
+        // rollback initially.
+        this.rollback(db, INFO_STORE_NAME, this.modelPath)
+          .then(() => reject(putModelRequest.error))
+          .catch((err) => reject(putModelRequest.error));
+      }
+
+      // close the database
       infoTx.oncomplete = () => {
         if (modelTx == null) {
           db.close();
@@ -216,8 +225,10 @@ export class BrowserIndexedDB implements IOHandler {
           modelTx.oncomplete = () => db.close();
         }
       };
+
+      resolve({ modelArtifactsInfo });
     });
-  }
+    }
 
   private rollback(db: IDBDatabase, storeName: string, keyPath: string):
       Promise<void> {
@@ -241,6 +252,14 @@ export class BrowserIndexedDB implements IOHandler {
         return reject(error);
       };
     })
+  }
+
+  // TODO: fix type to IDBRequest.result?
+  private promisifyRequest(req: IDBRequest): Promise<any> {
+    return new Promise((resolve, reject) => {
+      req.onsuccess = e => resolve(req.result);
+      req.onerror = e => reject(req.error);
+    });
   }
 }
 
