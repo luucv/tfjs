@@ -26,7 +26,7 @@ const DATABASE_NAME = 'tensorflowjs';
 const DATABASE_VERSION = 1;
 
 // Saving in chuncks allows to store bigger models.
-const MAX_CHUNCK_SIZE = 15000000 // 15mb
+const MAX_CHUNCK_SIZE = 15000000; // 15mb
 
 // Model data and ModelArtifactsInfo (metadata) are stored in two separate
 // stores for efficient access of the list of stored models and their metadata.
@@ -142,7 +142,7 @@ export class BrowserIndexedDB implements IOHandler {
 
         if (modelArtifacts == null) {
           this.loadModel(db)
-            .then((modelArtifacts: ModelArtifacts) => {resolve(modelArtifacts)})
+            .then((modelArtifacts: ModelArtifacts) => resolve(modelArtifacts))
             .catch((err) => reject(err));
         } else {
           this.saveModel(db, modelArtifacts)
@@ -174,18 +174,22 @@ export class BrowserIndexedDB implements IOHandler {
       }
 
       const idbModelArtifacts: IDBModelArtifacts = model.modelArtifacts;
-      const modelArtifacts = model.modelArtifacts
+      const modelArtifacts = model.modelArtifacts;
 
       if (idbModelArtifacts.weightChunckKeys !== null) {
-        const weightDataChuncked: ArrayBuffer[] = await Promise.all(idbModelArtifacts.weightChunckKeys.map(async (chunckKey: string) => {
-          const weightTx = db.transaction(WEIGHTS_STORE_NAME, 'readwrite');
-          const weightsStore = weightTx.objectStore(WEIGHTS_STORE_NAME);
-          const weightDataChunck = await this.promisifyRequest(weightsStore.get(chunckKey));
-          return weightDataChunck.weightData
-        }));
+        const weightDataChuncked: ArrayBuffer[] = await Promise.all(
+            idbModelArtifacts.weightChunckKeys.map(
+                async (chunckKey: string) => {
+              const weightTx = db.transaction(WEIGHTS_STORE_NAME, 'readwrite');
+              const weightsStore = weightTx.objectStore(WEIGHTS_STORE_NAME);
+              const weightDataChunck = await this
+                .promisifyRequest(weightsStore.get(chunckKey));
+              return weightDataChunck.weightData;
+          })
+        );
 
         const weightData = concatenateArrayBuffers(weightDataChuncked);
-        modelArtifacts.weightData = weightData
+        modelArtifacts.weightData = weightData;
       }
 
       resolve(modelArtifacts);
@@ -221,9 +225,11 @@ export class BrowserIndexedDB implements IOHandler {
       idbModelArtifacts.weightChunckKeys = null;
 
       if (modelArtifacts.weightData !== null) {
-        const amountOfChuncks = Math.ceil(modelArtifacts.weightData.byteLength / MAX_CHUNCK_SIZE)
-        const chunckIds = Array.from(Array(amountOfChuncks).keys()).map((item, i) => {
-          return `dextr_${i}`
+        const amountOfChuncks = Math
+          .ceil(modelArtifacts.weightData.byteLength / MAX_CHUNCK_SIZE);
+        const chunckIds = Array.from(Array(amountOfChuncks).keys())
+            .map((item, i) => {
+          return `dextr_${i}`;
         });
         idbModelArtifacts.weightChunckKeys = chunckIds;
 
@@ -232,12 +238,12 @@ export class BrowserIndexedDB implements IOHandler {
             const weightTx = db.transaction(WEIGHTS_STORE_NAME, 'readwrite');
             const weightsStore = weightTx.objectStore(WEIGHTS_STORE_NAME);
 
-            const start = i * MAX_CHUNCK_SIZE
+            const start = i * MAX_CHUNCK_SIZE;
             const end = start + MAX_CHUNCK_SIZE <
               modelArtifacts.weightData.byteLength ? start + MAX_CHUNCK_SIZE :
               modelArtifacts.weightData.byteLength;
 
-            const weightData = modelArtifacts.weightData.slice(start, end)
+            const weightData = modelArtifacts.weightData.slice(start, end);
 
             try {
               await this.promisifyRequest(
@@ -247,7 +253,7 @@ export class BrowserIndexedDB implements IOHandler {
                 })
               );
             } catch (err) {
-              throw new Error(err)
+              throw new Error(err);
             }
           }));
         } catch (error) {
@@ -256,7 +262,7 @@ export class BrowserIndexedDB implements IOHandler {
           // rollback initially.
           this.rollbackArray(db, WEIGHTS_STORE_NAME, chunckIds).catch();
           this.rollback(db, INFO_STORE_NAME, this.modelPath).catch();
-          reject(error)
+          reject(error);
         }
       }
 
@@ -300,7 +306,7 @@ export class BrowserIndexedDB implements IOHandler {
       await Promise.all(keyPaths.map(keyPath => {
         this.rollback(db, storeName, keyPath)
           .then(() => resolve())
-          .catch(() => reject())
+          .catch(() => reject());
       }));
     });
   }
@@ -315,7 +321,7 @@ export class BrowserIndexedDB implements IOHandler {
       try {
         deleteInfoRequest = store.delete(keyPath);
       } catch (err) {
-        return reject(err)
+        return reject(err);
       }
 
       deleteInfoRequest.onsuccess = () => {
@@ -324,10 +330,11 @@ export class BrowserIndexedDB implements IOHandler {
       deleteInfoRequest.onerror = error => {
         return reject(error);
       };
-    })
+    });
   }
 
   // TODO: fix type to IDBRequest.result?
+  // tslint:disable-next-line:no-any
   private promisifyRequest(req: IDBRequest): Promise<any> {
     return new Promise((resolve, reject) => {
       req.onsuccess = e => resolve(req.result);
