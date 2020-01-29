@@ -174,21 +174,21 @@ export class BrowserIndexedDB implements IOHandler {
       }
 
       const idbModelArtifacts: IDBModelArtifacts = model.modelArtifacts;
-      const weightDataChuncked: ArrayBuffer[] = await Promise.all(idbModelArtifacts.weightChunckKeys.map(async (chunckKey: string) => {
-        const weightTx = db.transaction(WEIGHTS_STORE_NAME, 'readwrite');
-        const weightsStore = weightTx.objectStore(WEIGHTS_STORE_NAME);
-        const weightDataChunck = await this.promisifyRequest(weightsStore.get(chunckKey));
-        return weightDataChunck.weightData
-      }));
-
-      const weightData = concatenateArrayBuffers(weightDataChuncked)
       const modelArtifacts = model.modelArtifacts
 
-      modelArtifacts.weightData = weightData
-      resolve(modelArtifacts);
+      if (idbModelArtifacts.weightChunckKeys !== null) {
+        const weightDataChuncked: ArrayBuffer[] = await Promise.all(idbModelArtifacts.weightChunckKeys.map(async (chunckKey: string) => {
+          const weightTx = db.transaction(WEIGHTS_STORE_NAME, 'readwrite');
+          const weightsStore = weightTx.objectStore(WEIGHTS_STORE_NAME);
+          const weightDataChunck = await this.promisifyRequest(weightsStore.get(chunckKey));
+          return weightDataChunck.weightData
+        }));
 
-      // ??
-      // modelTx.oncomplete = () => db.close();
+        const weightData = concatenateArrayBuffers(weightDataChuncked);
+        modelArtifacts.weightData = weightData
+      }
+
+      resolve(modelArtifacts);
     });
   }
 
@@ -216,51 +216,54 @@ export class BrowserIndexedDB implements IOHandler {
       }
 
       // Second, store the model weights in chuncks.
-      const amountOfChuncks = Math.ceil(modelArtifacts.weightData.byteLength / MAX_CHUNCK_SIZE)
-      const chunckIds = Array.from(Array(amountOfChuncks).keys()).map((item, i) => {
-        return `dextr_${i}`
-      });
+      const idbModelArtifacts: IDBModelArtifacts = modelArtifacts;
+      idbModelArtifacts.weightData = null;
+      idbModelArtifacts.weightChunckKeys = null;
 
-      try {
-        await Promise.all(chunckIds.map(async (chunckId, i) => {
-          const weightTx = db.transaction(WEIGHTS_STORE_NAME, 'readwrite');
-          const weightsStore = weightTx.objectStore(WEIGHTS_STORE_NAME);
+      if (modelArtifacts.weightData !== null) {
+        const amountOfChuncks = Math.ceil(modelArtifacts.weightData.byteLength / MAX_CHUNCK_SIZE)
+        const chunckIds = Array.from(Array(amountOfChuncks).keys()).map((item, i) => {
+          return `dextr_${i}`
+        });
+        idbModelArtifacts.weightChunckKeys = chunckIds;
 
-          const start = i * MAX_CHUNCK_SIZE
-          const end = start + MAX_CHUNCK_SIZE <
-            modelArtifacts.weightData.byteLength ? start + MAX_CHUNCK_SIZE :
-            modelArtifacts.weightData.byteLength;
+        try {
+          await Promise.all(chunckIds.map(async (chunckId, i) => {
+            const weightTx = db.transaction(WEIGHTS_STORE_NAME, 'readwrite');
+            const weightsStore = weightTx.objectStore(WEIGHTS_STORE_NAME);
 
-          const weightData = modelArtifacts.weightData.slice(start, end)
+            const start = i * MAX_CHUNCK_SIZE
+            const end = start + MAX_CHUNCK_SIZE <
+              modelArtifacts.weightData.byteLength ? start + MAX_CHUNCK_SIZE :
+              modelArtifacts.weightData.byteLength;
 
-          try {
-            await this.promisifyRequest(
-              weightsStore.put({
-                chunckId,
-                weightData,
-              })
-            );
-          } catch (err) {
-            throw new Error(err)
-          }
-        }));
-      } catch (error) {
-        // If the put-model request fails, roll back the info entry as
-        // well. If rollback fails, reject with error that triggered the
-        // rollback initially.
-        this.rollbackArray(db, WEIGHTS_STORE_NAME, chunckIds).catch();
-        this.rollback(db, INFO_STORE_NAME, this.modelPath).catch();
-        reject(error)
+            const weightData = modelArtifacts.weightData.slice(start, end)
+
+            try {
+              await this.promisifyRequest(
+                weightsStore.put({
+                  chunckId,
+                  weightData,
+                })
+              );
+            } catch (err) {
+              throw new Error(err)
+            }
+          }));
+        } catch (error) {
+          // If the put-model request fails, roll back the info entry as
+          // well. If rollback fails, reject with error that triggered the
+          // rollback initially.
+          this.rollbackArray(db, WEIGHTS_STORE_NAME, chunckIds).catch();
+          this.rollback(db, INFO_STORE_NAME, this.modelPath).catch();
+          reject(error)
+        }
       }
 
       // Third, put model data into model store.
       const modelTx = db.transaction(MODEL_STORE_NAME, 'readwrite');
       const modelStore = modelTx.objectStore(MODEL_STORE_NAME);
       let putModelRequest: IDBTransaction;
-
-      const idbModelArtifacts: IDBModelArtifacts = modelArtifacts;
-      idbModelArtifacts.weightData = null;
-      idbModelArtifacts.weightChunckKeys = chunckIds
 
       try {
         putModelRequest = await this.promisifyRequest(
