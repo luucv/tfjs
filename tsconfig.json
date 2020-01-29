@@ -10,7 +10,8 @@
     "target": "es5",
     "lib": [
       "es2015",
-      "dom"
+      "dom",
+      "esnext.asynciterable"
     ],
     "outDir": "./dist",
     "noUnusedLocals": true,
